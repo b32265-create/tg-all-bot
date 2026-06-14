@@ -4,31 +4,30 @@ import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters
 from config import ADMIN_USER_ID
-from database import get_total_users, update_user_premium_status, get_all_users
+from database import get_total_users, update_user_premium_status, get_all_users, get_bot_setting, update_bot_setting
 
 logger = logging.getLogger(__name__)
 
-ASK_PREMIUM_DATA, ASK_BROADCAST_MESSAGE, ASK_MAINTENANCE_MSG, ASK_FSUB_CHANNEL = range(4)
+ASK_PREMIUM_DATA, ASK_BROADCAST_MESSAGE, ASK_MAINTENANCE_MSG, ASK_FSUB_CHANNEL, ASK_BALANCE_DATA, ASK_REWARD_DATA, ASK_DUMP_CHANNEL = range(7)
 
-def load_maintenance():
-    if os.path.exists("maintenance.json"):
-        with open("maintenance.json", "r") as f:
-            return json.load(f)
-    return {"is_maintenance": False, "message": "The bot is currently undergoing maintenance. Please check back later."}
+async def load_dump_channel():
+    return await get_bot_setting("dump_channel", {})
 
-def save_maintenance(data):
-    with open("maintenance.json", "w") as f:
-        json.dump(data, f)
+async def save_dump_channel(data):
+    await update_bot_setting("dump_channel", data)
 
-def load_force_sub():
-    if os.path.exists("force_sub.json"):
-        with open("force_sub.json", "r") as f:
-            return json.load(f)
-    return {}
+async def load_maintenance():
+    default_m = {"is_maintenance": False, "message": "The bot is currently undergoing maintenance. Please check back later."}
+    return await get_bot_setting("maintenance", default_m)
 
-def save_force_sub(data):
-    with open("force_sub.json", "w") as f:
-        json.dump(data, f)
+async def save_maintenance(data):
+    await update_bot_setting("maintenance", data)
+
+async def load_force_sub():
+    return await get_bot_setting("force_sub", {})
+
+async def save_force_sub(data):
+    await update_bot_setting("force_sub", data)
 
 async def is_admin(user_id: int) -> bool:
     if not ADMIN_USER_ID:
@@ -53,7 +52,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "╰┈➤ **Select an option below:**"
     )
     
-    m_data = load_maintenance()
+    m_data = await load_maintenance()
     m_status = "🟢 ON" if m_data.get("is_maintenance") else "🔴 OFF"
     
     keyboard = [
@@ -64,6 +63,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [InlineKeyboardButton(f"🛠 Maintenance: {m_status}", callback_data='admin_toggle_maintenance')],
         [InlineKeyboardButton("📢 Force Sub Channels", callback_data='admin_fsub_menu')],
+        [
+            InlineKeyboardButton("💳 Manage Balances", callback_data='admin_manage_balance'),
+            InlineKeyboardButton("💰 Set Reward", callback_data='admin_set_reward')
+        ],
+        [InlineKeyboardButton("📂 Set Dump Channel", callback_data='admin_set_dump_channel')],
         [InlineKeyboardButton("📄 Get Logs", callback_data='admin_get_logs')],
         [InlineKeyboardButton("❌ Close Panel", callback_data='admin_close')]
     ]
@@ -165,6 +169,85 @@ async def receive_premium_data(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     return ConversationHandler.END
 
+async def prompt_manage_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='admin_panel_back')]]
+    msg = (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💳 **Manage User Balance**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Please send the action, **User ID**, and amount.\n"
+        "Format: `add <user_id> <amount>` OR `remove <user_id> <amount>`\n"
+        "Example: `add 123456789 50`"
+    )
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    return ASK_BALANCE_DATA
+
+async def receive_balance_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    
+    parts = text.split()
+    if len(parts) != 3 or parts[0] not in ['add', 'remove']:
+        await update.message.reply_text("❌ Invalid format. Please use `add <user_id> <amount>` or `remove <user_id> <amount>`.", parse_mode='Markdown')
+        return ASK_BALANCE_DATA
+        
+    action, target_id_str, amount_str = parts[0], parts[1], parts[2]
+    
+    try:
+        target_id = int(target_id_str)
+        amount = float(amount_str)
+    except ValueError:
+        await update.message.reply_text("❌ Invalid User ID or amount. Must be numbers.")
+        return ASK_BALANCE_DATA
+        
+    from database import update_user_balance
+    
+    if action == "add":
+        success = await update_user_balance(target_id, amount)
+        msg = f"✅ Added ₹{amount} to `{target_id}`'s balance." if success else "❌ Failed to add balance."
+    else:
+        success = await update_user_balance(target_id, -amount)
+        msg = f"✅ Removed ₹{amount} from `{target_id}`'s balance." if success else "❌ Failed to remove balance or insufficient funds."
+        
+    keyboard = [[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data='admin_panel_back')]]
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    return ConversationHandler.END
+
+async def prompt_set_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='admin_panel_back')]]
+    
+    current_reward = await get_bot_setting("reward", 10)
+            
+    msg = (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💰 **Set Default Gmail Reward**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"**Current Reward:** ₹{current_reward}\n\n"
+        "Please send the new reward amount (e.g., `15`)."
+    )
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    return ASK_REWARD_DATA
+
+async def receive_reward_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        amount = float(text)
+        if amount < 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Must be a positive number.")
+        return ASK_REWARD_DATA
+        
+    await update_bot_setting("reward", amount)
+        
+    keyboard = [[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data='admin_panel_back')]]
+    await update.message.reply_text(f"✅ **Success!** New reward set to ₹{amount}.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    return ConversationHandler.END
+
 async def prompt_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -205,13 +288,13 @@ async def admin_toggle_maintenance(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
     
-    m_data = load_maintenance()
+    m_data = await load_maintenance()
     is_on = m_data.get("is_maintenance", False)
     
     if is_on:
         # Turn it OFF
         m_data["is_maintenance"] = False
-        save_maintenance(m_data)
+        await save_maintenance(m_data)
         await admin_panel(update, context)
         return ConversationHandler.END
     else:
@@ -230,10 +313,10 @@ async def admin_toggle_maintenance(update: Update, context: ContextTypes.DEFAULT
 async def receive_maintenance_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text_html or update.message.text
     
-    m_data = load_maintenance()
+    m_data = await load_maintenance()
     m_data["is_maintenance"] = True
     m_data["message"] = text
-    save_maintenance(m_data)
+    await save_maintenance(m_data)
     
     keyboard = [[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data='admin_panel_back')]]
     await update.message.reply_text("✅ Maintenance mode is now **ON** with the new message.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -257,7 +340,7 @@ async def admin_fsub_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not await is_admin(user_id): return
     
-    channels = load_force_sub()
+    channels = await load_force_sub()
     
     text = "━━━━━━━━━━━━━━━━━━━━\n📢 **Force Sub Channels**\n━━━━━━━━━━━━━━━━━━━━\n\n"
     if not channels:
@@ -299,16 +382,19 @@ async def prompt_fsub_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_fsub_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id_or_username = update.message.text.strip()
-    channels = load_force_sub()
+    channels = await load_force_sub()
     
     try:
+        if channel_id_or_username.lstrip('-').isdigit():
+            channel_id_or_username = int(channel_id_or_username)
+            
         chat = await context.bot.get_chat(channel_id_or_username)
         # Try to fetch bot member status to ensure it can read
         await context.bot.get_chat_member(chat.id, context.bot.id)
         
         cid_str = str(chat.id)
         channels[cid_str] = chat.title or channel_id_or_username
-        save_force_sub(channels)
+        await save_force_sub(channels)
         
         msg = f"✅ Channel **{chat.title}** successfully added to Force Sub!"
     except Exception as e:
@@ -326,16 +412,58 @@ async def admin_fsub_rem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(user_id): return
     
     cid_to_rem = query.data.split('admin_fsub_rem_')[1]
-    channels = load_force_sub()
+    channels = await load_force_sub()
     
     if cid_to_rem in channels:
         cname = channels.pop(cid_to_rem)
-        save_force_sub(channels)
+        await save_force_sub(channels)
         await query.answer(f"Removed {cname} from Force Sub", show_alert=True)
     else:
         await query.answer("Channel not found.", show_alert=True)
         
     await admin_fsub_menu(update, context)
+
+async def prompt_dump_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='admin_panel_back')]]
+    
+    current_channel = "Not Set"
+    d_data = await load_dump_channel()
+    if d_data.get("channel_id"):
+        current_channel = str(d_data["channel_id"])
+        
+    msg = (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📂 **Set Private Dump Channel**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"**Current Channel:** `{current_channel}`\n\n"
+        "Please send the Channel ID (e.g., `-100123456789`).\n"
+        "**NOTE:** The bot must be an ADMIN in this channel!"
+    )
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    return ASK_DUMP_CHANNEL
+
+async def receive_dump_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    channel_id = update.message.text.strip()
+    
+    try:
+        if channel_id.lstrip('-').isdigit():
+            channel_id = int(channel_id)
+            
+        # Try to fetch chat to ensure bot has access
+        chat = await context.bot.get_chat(channel_id)
+        
+        await save_dump_channel({"channel_id": chat.id})
+        msg = f"✅ Dump channel **{chat.title}** successfully set!"
+    except Exception as e:
+        msg = f"❌ Error setting dump channel: {e}\n\nMake sure the bot is an admin in the channel and the ID is correct."
+        logger.error(msg)
+        
+    keyboard = [[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data='admin_panel_back')]]
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    return ConversationHandler.END
 
 def setup_admin_handlers(application: Application):
     """Register all admin handlers."""
@@ -356,13 +484,19 @@ def setup_admin_handlers(application: Application):
             CallbackQueryHandler(prompt_manage_premium, pattern='^admin_manage_premium$'),
             CallbackQueryHandler(prompt_broadcast, pattern='^admin_broadcast$'),
             CallbackQueryHandler(admin_toggle_maintenance, pattern='^admin_toggle_maintenance$'),
-            CallbackQueryHandler(prompt_fsub_add, pattern='^admin_fsub_add$')
+            CallbackQueryHandler(prompt_fsub_add, pattern='^admin_fsub_add$'),
+            CallbackQueryHandler(prompt_manage_balance, pattern='^admin_manage_balance$'),
+            CallbackQueryHandler(prompt_set_reward, pattern='^admin_set_reward$'),
+            CallbackQueryHandler(prompt_dump_channel, pattern='^admin_set_dump_channel$')
         ],
         states={
             ASK_PREMIUM_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_premium_data)],
             ASK_BROADCAST_MESSAGE: [MessageHandler(filters.ALL & ~filters.COMMAND, receive_broadcast)],
             ASK_MAINTENANCE_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_maintenance_msg)],
-            ASK_FSUB_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_fsub_channel)]
+            ASK_FSUB_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_fsub_channel)],
+            ASK_BALANCE_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_balance_data)],
+            ASK_REWARD_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reward_data)],
+            ASK_DUMP_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_dump_channel)]
         },
         fallbacks=[
             CommandHandler('admin', admin_panel),

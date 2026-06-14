@@ -3,6 +3,11 @@ import asyncio
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
+# --- Monkey Patch Pyrogram for new Telegram Channel IDs ---
+import pyrogram.utils
+pyrogram.utils.MIN_CHANNEL_ID = -1009999999999
+# ----------------------------------------------------------
+
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -11,6 +16,7 @@ from config import BOT_TOKEN
 # Import module handlers
 from modules.ads.handlers import setup_ads_handlers
 from modules.admin.handlers import setup_admin_handlers
+from modules.gmail_store.handlers import setup_gmail_store_handlers
 
 # Enable logging
 logging.basicConfig(
@@ -37,9 +43,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     keyboard = [
-        [InlineKeyboardButton("Ads Bot", callback_data='module_ads')],
-        # Future modules will be added here
-        [InlineKeyboardButton("Scraper Module (Coming Soon)", callback_data='module_coming_soon')],
+        [InlineKeyboardButton("📢 Ads Bot", callback_data='module_ads')],
+        [
+            InlineKeyboardButton("📥 Sell Gmails", callback_data='module_gmail_store'),
+            InlineKeyboardButton("🛒 Buy Gmails", callback_data='module_gmail_buy_shop')
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -114,6 +122,7 @@ def main():
     # Setup module handlers
     setup_ads_handlers(application)
     setup_admin_handlers(application)
+    setup_gmail_store_handlers(application)
     
     # Global Middleware (Maintenance & Force Sub)
     from telegram.ext import TypeHandler, ApplicationHandlerStop
@@ -129,7 +138,7 @@ def main():
         is_user_admin = await is_admin(user_id)
         
         # 1. Maintenance Check
-        m_data = load_maintenance()
+        m_data = await load_maintenance()
         if m_data.get("is_maintenance") and not is_user_admin:
             msg = m_data.get("message", "The bot is currently undergoing maintenance. Please check back later.")
             text = f"🛠 **Maintenance Break:**\n\n{msg}"
@@ -141,7 +150,7 @@ def main():
 
         # 2. Force Sub Check
         if not is_user_admin:
-            channels = load_force_sub()
+            channels = await load_force_sub()
             if channels:
                 not_joined = []
                 for cid_str, cname in channels.items():
@@ -186,9 +195,15 @@ def main():
                             await update.callback_query.answer("You haven't joined all channels yet!", show_alert=True)
                         else:
                             await update.callback_query.answer("Please join the required channels first.", show_alert=True)
-                            await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+                            try:
+                                await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+                            except BadRequest:
+                                await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
                     elif update.message:
-                        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+                        try:
+                            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown', quote=False)
+                        except BadRequest:
+                            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
                         
                     raise ApplicationHandlerStop()
 
