@@ -155,7 +155,7 @@ async def prompt_submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Enter your Email:\n"
         f"Reward: ₹{current_reward}\n\n"
         "Type /cancel to cancel\n"
-        "Support: @gmail_buyyyer"
+        "Support: @Shadow_seller07"
     )
     await update.message.reply_text(text)
     return ASK_EMAIL
